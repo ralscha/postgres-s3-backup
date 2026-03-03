@@ -29,7 +29,7 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 | `POSTGRES_HOST`     | Postgres host                                               |
 | `POSTGRES_USER`     | Postgres username                                           |
 
-### Optional — Postgres
+### Postgres
 
 | Variable            | Default  | Description                                                                            |
 |---------------------|----------|----------------------------------------------------------------------------------------|
@@ -38,7 +38,7 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 | `PGDUMP_EXTRA_OPTS` | _(empty)_ | Extra flags passed verbatim to `pg_dump`                                               |
 | `PGDUMP_COMPRESS_LEVEL` | `6`  | Dump compression level `0`–`9`; ignored when `PGDUMP_EXTRA_OPTS` already sets `--compress`/`-Z` |
 
-### Optional — S3
+### S3
 
 | Variable               | Default      | Description                                                          |
 |------------------------|--------------|----------------------------------------------------------------------|
@@ -48,7 +48,7 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 | `S3_PREFIX`            | _(empty)_    | Object key prefix (e.g. `backup`). Empty = store at bucket root.     |
 | `S3_ADDRESSING_MODE`   | `path`       | `auto`, `path`, or `virtual`                                         |
 
-### Optional — Encryption
+### Encryption
 
 `PASSPHRASE` and `AGE_PUBLIC_KEY` are **mutually exclusive**. Leave both empty to disable encryption.
 
@@ -69,7 +69,7 @@ age-keygen -o backup.key
 Set `AGE_PUBLIC_KEY` to the public key (`age1...`) for backup.  
 For restore, set `PASSPHRASE` to the full contents of `backup.key` (the identity file).
 
-### Optional — Scheduling & mode
+### Scheduling & mode
 
 | Variable           | Default   | Description                                                                               |
 |--------------------|-----------|-------------------------------------------------------------------------------------------|

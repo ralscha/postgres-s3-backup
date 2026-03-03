@@ -1,0 +1,82 @@
+version: '3'
+
+vars:
+  APP_BIN: "./dist/postgres-s3-backup{{exeExt}}"
+  GHCR_IMAGE: "ghcr.io/ralscha/postgres-s3-backup"
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list-all
+
+  format:
+    desc: Format Go code
+    cmds:
+      - go fix ./...
+      - go fmt ./...
+
+  tidy:
+    desc: Tidy module dependencies
+    cmds:
+      - go mod tidy
+
+  build:
+    desc: Build optimized binary for current platform
+    cmds:
+      - go build -trimpath -ldflags "-s -w -buildid=" -o {{.APP_BIN}} ./cmd/postgres-s3-backup
+
+  run:dev:
+    desc: Run the application without building (using go run)
+    cmds:
+      - go run ./cmd/postgres-s3-backup
+
+  fmt:
+    desc: Format Go code
+    cmds:
+      - go fmt ./...
+
+  lint:
+    desc: Run golangci-lint in a Docker container
+    cmds:
+      - docker run --rm -v {{toSlash .ROOT_DIR}}:/app -w /app golangci/golangci-lint:v2.10.1 golangci-lint run -v --timeout 5m
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf dist
+
+  image:
+    desc: Build container image
+    cmds:
+      - docker build -t postgres-s3-backup:dev .
+
+  docker:login:
+    desc: Log in to GitHub Container Registry (uses GITHUB_TOKEN env var, prompts if not set)
+    silent: true
+    vars:
+      GHCR_USER: '{{index (splitList "/" .GHCR_IMAGE) 1}}'
+    cmds:
+      - |
+        TOKEN="${GITHUB_TOKEN}"
+        if [ -z "$TOKEN" ]; then
+          IFS= read -rsp "Enter GitHub Token: " TOKEN
+          echo
+        fi
+        printf '%s' "$TOKEN" | docker login ghcr.io --username {{.GHCR_USER}} --password-stdin
+
+  docker:build:
+    desc: Build Docker image for GitHub Container Registry
+    cmds:
+      - docker buildx build --platform linux/amd64 -t {{.GHCR_IMAGE}}:latest --load .
+
+  docker:push:
+    desc: Push Docker image to GitHub Container Registry
+    cmds:
+      - docker push {{.GHCR_IMAGE}}:latest
+
+  docker:build-and-push:
+    desc: Build and push Docker image to GitHub Container Registry
+    cmds:
+      - task: docker:build
+      - task: docker:push

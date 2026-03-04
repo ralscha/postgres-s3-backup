@@ -31,11 +31,6 @@ tasks:
     cmds:
       - go run ./cmd/postgres-s3-backup
 
-  fmt:
-    desc: Format Go code
-    cmds:
-      - go fmt ./...
-
   lint:
     desc: Run golangci-lint in a Docker container
     cmds:

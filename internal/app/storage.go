@@ -112,10 +112,6 @@ func (s *storageClient) downloadFile(ctx context.Context, bucket, key, filePath 
 }
 
 func (s *storageClient) listObjects(ctx context.Context, bucket, prefix string) ([]backupObject, error) {
-	if prefix != "" && !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
-
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucket),
 		Prefix: aws.String(prefix),

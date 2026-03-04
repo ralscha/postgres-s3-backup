@@ -22,7 +22,7 @@ func doBackup(ctx context.Context, cfg config, storage *storageClient) error {
 	slog.Info("creating database backup", "database", cfg.postgresDatabase)
 
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05")
-	objectKey := path.Join(cfg.s3Prefix, fmt.Sprintf("%s_%s.dump", cfg.postgresDatabase, timestamp))
+	objectKey := path.Join(normalizedS3Prefix(cfg), fmt.Sprintf("%s_%s.dump", cfg.postgresDatabase, timestamp))
 	if cfg.passphrase != "" || cfg.agePublicKey != "" {
 		objectKey += ".age"
 	}
@@ -277,11 +277,11 @@ func decryptFile(inputFile, outputFile string, cfg config) error {
 
 func resolveBackupKey(ctx context.Context, cfg config, storage *storageClient, timestamp, fileSuffix string) (string, error) {
 	if timestamp != "" {
-		return path.Join(cfg.s3Prefix, fmt.Sprintf("%s_%s%s", cfg.postgresDatabase, timestamp, fileSuffix)), nil
+		return path.Join(normalizedS3Prefix(cfg), fmt.Sprintf("%s_%s%s", cfg.postgresDatabase, timestamp, fileSuffix)), nil
 	}
 
 	slog.Info("finding latest backup")
-	objects, err := storage.listObjects(ctx, cfg.s3Bucket, path.Join(cfg.s3Prefix, cfg.postgresDatabase))
+	objects, err := storage.listObjects(ctx, cfg.s3Bucket, backupObjectPrefix(cfg))
 	if err != nil {
 		return "", err
 	}
@@ -306,7 +306,7 @@ func resolveBackupKey(ctx context.Context, cfg config, storage *storageClient, t
 // doList prints all available backup timestamps for the configured database,
 // one per line, sorted oldest to newest.
 func doList(ctx context.Context, cfg config, storage *storageClient) error {
-	objects, err := storage.listObjects(ctx, cfg.s3Bucket, path.Join(cfg.s3Prefix, cfg.postgresDatabase))
+	objects, err := storage.listObjects(ctx, cfg.s3Bucket, backupObjectPrefix(cfg))
 	if err != nil {
 		return err
 	}
@@ -338,7 +338,12 @@ func pruneOldBackups(ctx context.Context, cfg config, storage *storageClient) er
 	cutoff := time.Now().UTC().Add(-time.Duration(cfg.backupKeepDays) * 24 * time.Hour)
 	slog.Info("removing old backups", "cutoff", cutoff.Format(time.RFC3339))
 
-	objects, err := storage.listObjects(ctx, cfg.s3Bucket, cfg.s3Prefix)
+	listPrefix := normalizedS3Prefix(cfg)
+	if listPrefix != "" {
+		listPrefix += "/"
+	}
+
+	objects, err := storage.listObjects(ctx, cfg.s3Bucket, listPrefix)
 	if err != nil {
 		return err
 	}
@@ -356,6 +361,18 @@ func pruneOldBackups(ctx context.Context, cfg config, storage *storageClient) er
 
 	slog.Info("removal complete")
 	return nil
+}
+
+func backupObjectPrefix(cfg config) string {
+	prefix := normalizedS3Prefix(cfg)
+	if prefix == "" {
+		return cfg.postgresDatabase + "_"
+	}
+	return prefix + "/" + cfg.postgresDatabase + "_"
+}
+
+func normalizedS3Prefix(cfg config) string {
+	return strings.Trim(cfg.s3Prefix, "/")
 }
 
 func buildPgDumpCmd(cfg config) *exec.Cmd {

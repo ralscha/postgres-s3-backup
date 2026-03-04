@@ -2,7 +2,6 @@
 
 Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-compatible storage, with optional encryption and scheduling.
 
-
 ## Features
 
 - Backup PostgreSQL to S3 or any S3-compatible storage (MinIO, Cloudflare R2, etc.)

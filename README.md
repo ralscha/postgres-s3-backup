@@ -5,7 +5,6 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 
 ## Features
 
-- **Zero-disk streaming**: `pg_dump` output is piped through optional encryption directly into an S3 multipart upload — no local dump files created
 - Backup PostgreSQL to S3 or any S3-compatible storage (MinIO, Cloudflare R2, etc.)
 - Restore latest backup or a specific backup by timestamp
 - **Encryption options**:
@@ -14,8 +13,7 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 - Optional retention cleanup via `BACKUP_KEEP_DAYS`
 - Schedule support: `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`, or any Go duration like `24h`
 - Configurable S3 addressing mode for compatibility (`auto`, `path`, `virtual`)
-- Graceful shutdown on `SIGTERM`/`SIGINT` — safe for Kubernetes and Docker
-- Runs as non-root user inside the container
+
 
 ## Environment variables
 

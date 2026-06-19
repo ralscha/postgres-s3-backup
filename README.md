@@ -8,9 +8,9 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 - Restore latest backup or a specific backup by timestamp
 - **Encryption options**:
   - Symmetric passphrase encryption via `PASSPHRASE` (age scrypt)
-  - Asymmetric X25519 encryption via `AGE_PUBLIC_KEY` — backup host only needs the public key
-- Optional retention cleanup via `BACKUP_KEEP_DAYS`
-- Schedule support: `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`, or any Go duration like `24h`
+  - Asymmetric X25519 encryption via `AGE_PUBLIC_KEY`; backup host only needs the public key
+- Optional retention cleanup via `BACKUP_KEEP_DAYS` for the configured database
+- Schedule support: `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`, Go durations like `24h`, or cron expressions like `0 2 * * *`
 - Configurable S3 addressing mode for compatibility (`auto`, `path`, `virtual`)
 
 
@@ -33,7 +33,7 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 | `POSTGRES_PASSWORD` | _(empty)_ | Postgres password. Omit when using `.pgpass`, `pg_service.conf`, or `trust`/`peer` auth |
 | `POSTGRES_PORT`     | `5432`   | Postgres port                                                                          |
 | `PGDUMP_EXTRA_OPTS` | _(empty)_ | Extra flags passed verbatim to `pg_dump`                                               |
-| `PGDUMP_COMPRESS_LEVEL` | `6`  | Dump compression level `0`–`9`; ignored when `PGDUMP_EXTRA_OPTS` already sets `--compress`/`-Z` |
+| `PGDUMP_COMPRESS_LEVEL` | `6`  | Dump compression level `0`-`9`; ignored when `PGDUMP_EXTRA_OPTS` already sets `--compress`/`-Z` |
 
 ### S3
 
@@ -47,13 +47,13 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 
 ### Encryption
 
-`PASSPHRASE` and `AGE_PUBLIC_KEY` are **mutually exclusive**. Leave both empty to disable encryption.
+For backups, `PASSPHRASE` and `AGE_PUBLIC_KEY` are **mutually exclusive**. Leave both empty to disable encryption.
 
 | Variable          | Description                                                                                                   |
 |-------------------|---------------------------------------------------------------------------------------------------------------|
 | `PASSPHRASE`      | Symmetric scrypt passphrase for encrypt/decrypt. **Must match** on backup and restore hosts.                  |
-| `AGE_PUBLIC_KEY`  | X25519 public key (e.g. `age1...`). Backup requires only this; for **restore**, put the private key identity in `PASSPHRASE`. |
-| `AGE_WORK_FACTOR` | scrypt work factor used with `PASSPHRASE` (default `18`; valid `1`–`30`). Higher = slower but stronger KDF.   |
+| `AGE_PUBLIC_KEY`  | X25519 public key (e.g. `age1...`). Backup requires only this; for **restore**, also set this and put the private key identity in `PASSPHRASE`. |
+| `AGE_WORK_FACTOR` | scrypt work factor used with `PASSPHRASE` (default `18`; valid `1`-`30`). Higher = slower but stronger KDF.   |
 
 #### Generating an X25519 key pair
 
@@ -64,14 +64,14 @@ age-keygen -o backup.key
 ```
 
 Set `AGE_PUBLIC_KEY` to the public key (`age1...`) for backup.  
-For restore, set `PASSPHRASE` to the full contents of `backup.key` (the identity file).
+For restore, set `AGE_PUBLIC_KEY` again and set `PASSPHRASE` to the full contents of `backup.key` (the identity file).
 
 ### Scheduling & mode
 
 | Variable           | Default   | Description                                                                               |
 |--------------------|-----------|-------------------------------------------------------------------------------------------|
-| `SCHEDULE`         | _(empty)_ | Run interval. Empty = run once and exit. Examples: `@daily`, `@weekly`, `12h`             |
-| `BACKUP_KEEP_DAYS` | `0`       | Delete backups older than N days. `0` disables pruning.                                   |
+| `SCHEDULE`         | _(empty)_ | Run interval or cron expression. Empty = run once and exit. Examples: `@daily`, `12h`, `0 2 * * *` |
+| `BACKUP_KEEP_DAYS` | `0`       | Delete backups for this database older than N days. `0` disables pruning.                 |
 | `MODE`             | `backup`  | `backup`, `restore`, or `list`                                                            |
 | `RESTORE_TIMESTAMP`| _(empty)_ | Specific backup timestamp to restore (`2026-01-14T12:00:00`). Empty = restore latest.     |
 | `LOG_LEVEL`        | `info`    | `debug`, `info`, `warn`, or `error`                                                       |

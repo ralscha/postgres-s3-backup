@@ -13,6 +13,15 @@ import (
 func loadConfig() (config, error) {
 	var cfg config
 
+	rawMode := strings.ToLower(strings.TrimSpace(os.Getenv("MODE")))
+	if rawMode == "" {
+		rawMode = "backup"
+	}
+	if rawMode != "backup" && rawMode != "restore" && rawMode != "list" {
+		return cfg, fmt.Errorf("invalid MODE %q (allowed: backup, restore, list)", rawMode)
+	}
+	cfg.mode = rawMode
+
 	cfg.s3Bucket = strings.TrimSpace(os.Getenv("S3_BUCKET"))
 	if cfg.s3Bucket == "" {
 		return cfg, errors.New("you need to set the S3_BUCKET environment variable")
@@ -53,6 +62,9 @@ func loadConfig() (config, error) {
 	}
 	cfg.s3AccessKeyID = strings.TrimSpace(os.Getenv("S3_ACCESS_KEY_ID"))
 	cfg.s3SecretAccessKey = strings.TrimSpace(os.Getenv("S3_SECRET_ACCESS_KEY"))
+	if (cfg.s3AccessKeyID == "") != (cfg.s3SecretAccessKey == "") {
+		return cfg, errors.New("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together")
+	}
 	cfg.s3Region = strings.TrimSpace(os.Getenv("S3_REGION"))
 	if cfg.s3Region == "" {
 		return cfg, errors.New("you need to set the S3_REGION environment variable")
@@ -64,7 +76,7 @@ func loadConfig() (config, error) {
 	cfg.schedule = strings.TrimSpace(os.Getenv("SCHEDULE"))
 	cfg.passphrase = os.Getenv("PASSPHRASE")
 	cfg.agePublicKey = strings.TrimSpace(os.Getenv("AGE_PUBLIC_KEY"))
-	if cfg.agePublicKey != "" && cfg.passphrase != "" {
+	if cfg.agePublicKey != "" && cfg.passphrase != "" && cfg.mode != "restore" {
 		return cfg, errors.New("AGE_PUBLIC_KEY and PASSPHRASE are mutually exclusive; set only one")
 	}
 
@@ -78,15 +90,6 @@ func loadConfig() (config, error) {
 	}
 
 	cfg.restoreTimestamp = strings.TrimSpace(os.Getenv("RESTORE_TIMESTAMP"))
-
-	rawMode := strings.ToLower(strings.TrimSpace(os.Getenv("MODE")))
-	if rawMode == "" {
-		rawMode = "backup"
-	}
-	if rawMode != "backup" && rawMode != "restore" && rawMode != "list" {
-		return cfg, fmt.Errorf("invalid MODE %q (allowed: backup, restore, list)", rawMode)
-	}
-	cfg.mode = rawMode
 
 	level, err := parseLogLevel(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
 	if err != nil {

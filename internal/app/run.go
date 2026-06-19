@@ -47,7 +47,7 @@ func Run() error {
 		return runWithCron(ctx, cfg, storage)
 	}
 
-	// Interval-based: Go duration (e.g. "24h") or @-shorthands (@daily, @hourly, …)
+	// Interval-based: Go duration (e.g. "24h") or @-shorthands (@daily, @hourly, ...).
 	interval, err := parseSimpleSchedule(cfg.schedule)
 	if err != nil {
 		return err

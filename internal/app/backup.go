@@ -17,7 +17,7 @@ import (
 )
 
 // doBackup streams pg_dump output, optionally through age encryption, directly
-// to S3 — no temporary files are created.
+// to S3; no temporary files are created.
 func doBackup(ctx context.Context, cfg config, storage *storageClient) error {
 	slog.Info("creating database backup", "database", cfg.postgresDatabase)
 
@@ -42,7 +42,7 @@ func doBackup(ctx context.Context, cfg config, storage *storageClient) error {
 	return nil
 }
 
-// streamBackup pipes pg_dump → [age encrypt] → S3 upload without touching disk.
+// streamBackup pipes pg_dump through optional age encryption to S3 without touching disk.
 func streamBackup(ctx context.Context, cfg config, storage *storageClient, objectKey string) error {
 	dumpPr, dumpPw := io.Pipe()
 
@@ -338,12 +338,7 @@ func pruneOldBackups(ctx context.Context, cfg config, storage *storageClient) er
 	cutoff := time.Now().UTC().Add(-time.Duration(cfg.backupKeepDays) * 24 * time.Hour)
 	slog.Info("removing old backups", "cutoff", cutoff.Format(time.RFC3339))
 
-	listPrefix := normalizedS3Prefix(cfg)
-	if listPrefix != "" {
-		listPrefix += "/"
-	}
-
-	objects, err := storage.listObjects(ctx, cfg.s3Bucket, listPrefix)
+	objects, err := storage.listObjects(ctx, cfg.s3Bucket, backupObjectPrefix(cfg))
 	if err != nil {
 		return err
 	}
@@ -372,7 +367,7 @@ func backupObjectPrefix(cfg config) string {
 }
 
 func normalizedS3Prefix(cfg config) string {
-	return strings.Trim(cfg.s3Prefix, "/")
+	return strings.Trim(strings.TrimSpace(cfg.s3Prefix), "/")
 }
 
 func buildPgDumpCmd(cfg config) *exec.Cmd {

@@ -147,8 +147,7 @@ func (s *storageClient) deleteObject(ctx context.Context, bucket, key string) er
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		var noSuchKey *types.NoSuchKey
-		if errors.As(err, &noSuchKey) {
+		if _, ok := errors.AsType[*types.NoSuchKey](err); ok {
 			return nil
 		}
 		return fmt.Errorf("delete object %q failed: %w", key, err)

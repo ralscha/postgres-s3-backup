@@ -1,0 +1,7 @@
+.git
+.github
+.env
+.env.*
+dist
+postgres-s3-backup
+postgres-s3-backup.exe

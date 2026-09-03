@@ -1,3 +1,4 @@
+// Package main provides the postgres-s3-backup executable.
 package main
 
 import (

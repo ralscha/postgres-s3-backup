@@ -26,6 +26,12 @@ tasks:
     cmds:
       - go build -trimpath -ldflags "-s -w -buildid=" -o {{.APP_BIN}} ./cmd/postgres-s3-backup
 
+  test:
+    desc: Run unit tests and Go static analysis
+    cmds:
+      - go test ./...
+      - go vet ./...
+
   run:dev:
     desc: Run the application without building (using go run)
     cmds:
@@ -34,7 +40,7 @@ tasks:
   lint:
     desc: Run golangci-lint in a Docker container
     cmds:
-      - docker run --rm -v {{toSlash .ROOT_DIR}}:/app -w /app golangci/golangci-lint:v2.13.2 golangci-lint run -v --timeout 5m
+      - golangci-lint run -v --timeout 5m
 
   clean:
     desc: Clean build artifacts

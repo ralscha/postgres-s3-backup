@@ -8,9 +8,9 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 - Restore latest backup or a specific backup by timestamp
 - **Encryption options**:
   - Symmetric passphrase encryption via `PASSPHRASE` (age scrypt)
-  - Asymmetric X25519 encryption via `AGE_PUBLIC_KEY`; backup host only needs the public key
+  - Asymmetric X25519 encryption via `AGE_PUBLIC_KEY`; restore uses `AGE_IDENTITY`
 - Optional retention cleanup via `BACKUP_KEEP_DAYS` for the configured database
-- Schedule support: `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`, Go durations like `24h`, or cron expressions like `0 2 * * *`
+- Schedule support: standard cron descriptors, Go durations like `24h`, or cron expressions like `0 2 * * *`
 - Configurable S3 addressing mode for compatibility (`auto`, `path`, `virtual`)
 
 
@@ -23,8 +23,8 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 | `S3_BUCKET`         | S3 bucket name                                              |
 | `S3_REGION`         | AWS/S3-compatible region (e.g. `us-east-1`, `auto` for R2) |
 | `POSTGRES_DATABASE` | Database name to back up or restore                         |
-| `POSTGRES_HOST`     | Postgres host                                               |
-| `POSTGRES_USER`     | Postgres username                                           |
+| `POSTGRES_HOST`     | Postgres host (required for backup and restore)              |
+| `POSTGRES_USER`     | Postgres username (required for backup and restore)          |
 
 ### Postgres
 
@@ -32,8 +32,10 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 |---------------------|----------|----------------------------------------------------------------------------------------|
 | `POSTGRES_PASSWORD` | _(empty)_ | Postgres password. Omit when using `.pgpass`, `pg_service.conf`, or `trust`/`peer` auth |
 | `POSTGRES_PORT`     | `5432`   | Postgres port                                                                          |
-| `PGDUMP_EXTRA_OPTS` | _(empty)_ | Extra flags passed verbatim to `pg_dump`                                               |
+| `PGDUMP_EXTRA_OPTS` | _(empty)_ | Extra flags passed to `pg_dump`; shell-style single/double quoting is supported         |
 | `PGDUMP_COMPRESS_LEVEL` | `6`  | Dump compression level `0`-`9`; ignored when `PGDUMP_EXTRA_OPTS` already sets `--compress`/`-Z` |
+| `PGRESTORE_EXTRA_OPTS` | _(empty)_ | Extra flags passed to `pg_restore`; shell-style single/double quoting is supported    |
+| `PGRESTORE_CLEAN`   | `true`   | Remove existing database objects before recreating them during restore                  |
 
 ### S3
 
@@ -41,7 +43,8 @@ Docker sidecar and CLI tool for backing up PostgreSQL databases directly to S3-c
 |------------------------|--------------|----------------------------------------------------------------------|
 | `S3_ACCESS_KEY_ID`     | _(empty)_    | Access key (omit to use instance role / environment credentials)     |
 | `S3_SECRET_ACCESS_KEY` | _(empty)_    | Secret key                                                           |
-| `S3_ENDPOINT`          | _(empty)_    | Override endpoint URL for S3-compatible stores (e.g. MinIO)          |
+| `S3_SESSION_TOKEN`     | _(empty)_    | Optional session token for temporary static credentials              |
+| `S3_ENDPOINT`          | _(empty)_    | Override endpoint URL for S3-compatible stores; omitted scheme defaults to HTTPS |
 | `S3_PREFIX`            | _(empty)_    | Object key prefix (e.g. `backup`). Empty = store at bucket root.     |
 | `S3_ADDRESSING_MODE`   | `path`       | `auto`, `path`, or `virtual`                                         |
 
@@ -51,9 +54,10 @@ For backups, `PASSPHRASE` and `AGE_PUBLIC_KEY` are **mutually exclusive**. Leave
 
 | Variable          | Description                                                                                                   |
 |-------------------|---------------------------------------------------------------------------------------------------------------|
-| `PASSPHRASE`      | Symmetric scrypt passphrase for encrypt/decrypt. **Must match** on backup and restore hosts.                  |
-| `AGE_PUBLIC_KEY`  | X25519 public key (e.g. `age1...`). Backup requires only this; for **restore**, also set this and put the private key identity in `PASSPHRASE`. |
-| `AGE_WORK_FACTOR` | scrypt work factor used with `PASSPHRASE` (default `18`; valid `1`-`30`). Higher = slower but stronger KDF.   |
+| `PASSPHRASE`      | Symmetric scrypt passphrase for encrypt/decrypt. **Must match** on backup and restore hosts.                |
+| `AGE_PUBLIC_KEY`  | X25519 public key (e.g. `age1...`) used for backup. The backup host only needs this public value.          |
+| `AGE_IDENTITY`    | X25519 private identity (e.g. `AGE-SECRET-KEY-...`) used for restore. Keep this secret off the backup host. |
+| `AGE_WORK_FACTOR` | scrypt work factor used with `PASSPHRASE` (default `18`; valid `1`-`30`). Higher = slower but stronger KDF. |
 
 #### Generating an X25519 key pair
 
@@ -63,17 +67,20 @@ age-keygen -o backup.key
 # Public key is printed to stdout and stored in backup.key
 ```
 
-Set `AGE_PUBLIC_KEY` to the public key (`age1...`) for backup.  
-For restore, set `AGE_PUBLIC_KEY` again and set `PASSPHRASE` to the full contents of `backup.key` (the identity file).
+Set `AGE_PUBLIC_KEY` to the public key (`age1...`) for backup. For restore, set
+`AGE_IDENTITY` to the `AGE-SECRET-KEY-...` line from `backup.key` (or the full
+identity-file contents when your environment supports multiline values).
+`AGE_PUBLIC_KEY` is not required on the restore host. The older combination of
+`AGE_PUBLIC_KEY` plus an identity in `PASSPHRASE` remains supported for compatibility.
 
 ### Scheduling & mode
 
 | Variable           | Default   | Description                                                                               |
 |--------------------|-----------|-------------------------------------------------------------------------------------------|
-| `SCHEDULE`         | _(empty)_ | Run interval or cron expression. Empty = run once and exit. Examples: `@daily`, `12h`, `0 2 * * *` |
+| `SCHEDULE`         | _(empty)_ | Empty = run once. Durations such as `12h` run immediately and repeat; `@daily`, `@every 12h`, and cron expressions run on their cron schedule. |
 | `BACKUP_KEEP_DAYS` | `0`       | Delete backups for this database older than N days. `0` disables pruning.                 |
 | `MODE`             | `backup`  | `backup`, `restore`, or `list`                                                            |
-| `RESTORE_TIMESTAMP`| _(empty)_ | Specific backup timestamp to restore (`2026-01-14T12:00:00`). Empty = restore latest.     |
+| `RESTORE_TIMESTAMP`| _(empty)_ | Specific backup timestamp to restore. Copy the exact value from list output. Empty = restore latest. |
 | `LOG_LEVEL`        | `info`    | `debug`, `info`, `warn`, or `error`                                                       |
 
 ## Docker image
@@ -131,10 +138,14 @@ docker run --env-file .env ghcr.io/ralscha/postgres-s3-backup:latest
 docker run --rm --env-file .env -e MODE=restore ghcr.io/ralscha/postgres-s3-backup:latest
 ```
 
+Restore uses `--clean --if-exists` by default. Set `PGRESTORE_CLEAN=false` for
+a non-cleaning restore, and use `PGRESTORE_EXTRA_OPTS` for options such as
+`--no-owner` or `--role=app`.
+
 **Restore specific timestamp:**
 
 ```sh
-docker run --rm --env-file .env -e MODE=restore -e RESTORE_TIMESTAMP=2026-01-14T12:00:00 ghcr.io/ralscha/postgres-s3-backup:latest
+docker run --rm --env-file .env -e MODE=restore -e RESTORE_TIMESTAMP=2026-01-14T12:00:00.123456789 ghcr.io/ralscha/postgres-s3-backup:latest
 ```
 
 **List available backup timestamps:**

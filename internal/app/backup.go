@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path"
 	"sort"
 	"strings"
 	"time"
@@ -18,14 +17,11 @@ import (
 
 // doBackup streams pg_dump output, optionally through age encryption, directly
 // to S3; no temporary files are created.
-func doBackup(ctx context.Context, cfg config, storage *storageClient) error {
+func doBackup(ctx context.Context, cfg config, storage objectStorage) error {
 	slog.Info("creating database backup", "database", cfg.postgresDatabase)
 
-	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05")
-	objectKey := path.Join(normalizedS3Prefix(cfg), fmt.Sprintf("%s_%s.dump", cfg.postgresDatabase, timestamp))
-	if cfg.passphrase != "" || cfg.agePublicKey != "" {
-		objectKey += ".age"
-	}
+	timestamp := time.Now().UTC().Format(backupFilenameTimestampLayout)
+	objectKey := backupObjectKey(cfg, timestamp, backupUsesEncryption(cfg))
 
 	slog.Info("uploading backup", "bucket", cfg.s3Bucket, "key", objectKey)
 	if err := streamBackup(ctx, cfg, storage, objectKey); err != nil {
@@ -34,7 +30,7 @@ func doBackup(ctx context.Context, cfg config, storage *storageClient) error {
 
 	if cfg.backupKeepDays > 0 {
 		if err := pruneOldBackups(ctx, cfg, storage); err != nil {
-			return err
+			return fmt.Errorf("backup uploaded but retention cleanup failed: %w", err)
 		}
 	}
 
@@ -43,10 +39,13 @@ func doBackup(ctx context.Context, cfg config, storage *storageClient) error {
 }
 
 // streamBackup pipes pg_dump through optional age encryption to S3 without touching disk.
-func streamBackup(ctx context.Context, cfg config, storage *storageClient, objectKey string) error {
+func streamBackup(ctx context.Context, cfg config, storage objectStorage, objectKey string) error {
 	dumpPr, dumpPw := io.Pipe()
 
-	cmd := buildPgDumpCmd(cfg)
+	processCtx, cancelProcess := context.WithCancel(ctx)
+	defer cancelProcess()
+
+	cmd := buildPgDumpCmd(processCtx, cfg)
 	cmd.Stdout = dumpPw
 	cmd.Stderr = os.Stderr
 
@@ -70,11 +69,15 @@ func streamBackup(ctx context.Context, cfg config, storage *storageClient, objec
 	uploadSrc, encErrCh := maybeEncrypt(dumpPr, cfg)
 
 	uploadErr := storage.uploadStream(ctx, cfg.s3Bucket, objectKey, uploadSrc)
+	if uploadErr != nil {
+		// Stop pg_dump promptly when S3 rejects or aborts the upload. Closing the
+		// reader also unblocks the optional encryption goroutine.
+		cancelProcess()
+	}
+	_ = uploadSrc.Close()
 
-	// Drain/close the source pipe so the goroutines above can unblock and exit.
-	_, _ = io.Copy(io.Discard, uploadSrc)
-
-	// Collect errors, preferring the most meaningful one.
+	// Collect all pipeline errors so failures in PostgreSQL, encryption, and S3
+	// remain diagnosable from a single run.
 	dumpErr := <-dumpErrCh
 	if dumpErr != nil {
 		dumpErr = fmt.Errorf("pg_dump failed: %w", dumpErr)
@@ -85,13 +88,7 @@ func streamBackup(ctx context.Context, cfg config, storage *storageClient, objec
 		encErr = <-encErrCh
 	}
 
-	if uploadErr != nil {
-		return uploadErr
-	}
-	if dumpErr != nil {
-		return dumpErr
-	}
-	return encErr
+	return errors.Join(uploadErr, dumpErr, encErr)
 }
 
 // maybeEncrypt wraps r in an age encryption pipe when encryption is configured.
@@ -117,19 +114,22 @@ func maybeEncrypt(r io.ReadCloser, cfg config) (io.ReadCloser, chan error) {
 
 		enc, err := age.Encrypt(agePw, recipient)
 		if err != nil {
-			_ = agePw.CloseWithError(fmt.Errorf("age encrypt init: %w", err))
+			err = fmt.Errorf("age encrypt init: %w", err)
+			_ = agePw.CloseWithError(err)
 			errCh <- err
 			return
 		}
 
 		if _, err := io.Copy(enc, r); err != nil {
+			err = fmt.Errorf("age encrypt data: %w", err)
 			_ = agePw.CloseWithError(err)
 			errCh <- err
 			return
 		}
 
 		if err := enc.Close(); err != nil {
-			_ = agePw.CloseWithError(fmt.Errorf("age encrypt finalize: %w", err))
+			err = fmt.Errorf("age encrypt finalize: %w", err)
+			_ = agePw.CloseWithError(err)
 			errCh <- err
 			return
 		}
@@ -160,51 +160,56 @@ func buildAgeRecipient(cfg config) (age.Recipient, error) {
 	return r, nil
 }
 
-// buildAgeIdentity returns the scrypt identity used for decryption.
-// X25519 decryption requires the private key, which is given as the passphrase
-// (age identity file format) in that mode.
-func buildAgeIdentity(cfg config) (age.Identity, error) {
-	if cfg.agePublicKey != "" {
-		// PASSPHRASE holds the private key (age identity) when public-key mode was used.
-		identities, err := age.ParseIdentities(strings.NewReader(cfg.passphrase))
+// buildAgeIdentities returns the configured identities used for decryption.
+func buildAgeIdentities(cfg config) ([]age.Identity, error) {
+	identityText := cfg.ageIdentity
+	if identityText == "" && cfg.agePublicKey != "" {
+		// Backwards compatibility with the original configuration, which stored
+		// the private identity in PASSPHRASE when AGE_PUBLIC_KEY was also set.
+		identityText = cfg.passphrase
+	}
+	if identityText != "" {
+		identities, err := age.ParseIdentities(strings.NewReader(identityText))
 		if err != nil {
-			return nil, fmt.Errorf("invalid age identity in PASSPHRASE: %w", err)
+			return nil, fmt.Errorf("invalid age identity: %w", err)
 		}
 		if len(identities) == 0 {
-			return nil, errors.New("no age identity found in PASSPHRASE")
+			return nil, errors.New("no age identity found")
 		}
-		return identities[0], nil
+		return identities, nil
 	}
 
 	id, err := age.NewScryptIdentity(cfg.passphrase)
 	if err != nil {
 		return nil, fmt.Errorf("age scrypt identity: %w", err)
 	}
-	return id, nil
+	return []age.Identity{id}, nil
 }
 
 // doRestore downloads a backup from S3 (decrypting if needed) to a temporary
 // file, then calls pg_restore. pg_restore requires a seekable file for the
 // custom format, so we cannot fully stream the restore path.
-func doRestore(ctx context.Context, cfg config, storage *storageClient, timestamp string) error {
-	fileSuffix := ".dump"
-	if cfg.passphrase != "" || cfg.agePublicKey != "" {
-		fileSuffix = ".dump.age"
-	}
-
-	key, err := resolveBackupKey(ctx, cfg, storage, strings.TrimSpace(timestamp), fileSuffix)
+func doRestore(ctx context.Context, cfg config, storage objectStorage, timestamp string) error {
+	encrypted := restoreUsesEncryption(cfg)
+	key, err := resolveBackupKey(ctx, cfg, storage, strings.TrimSpace(timestamp), encrypted)
 	if err != nil {
 		return err
 	}
 
 	// Download to a temp file (possibly encrypted).
-	downloadTmp, err := os.CreateTemp("", "postgres-s3-restore-*.dump"+suffixOf(fileSuffix))
+	tempPattern := "postgres-s3-restore-*.dump"
+	if encrypted {
+		tempPattern += ".age"
+	}
+	downloadTmp, err := os.CreateTemp("", tempPattern)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	downloadTmpName := downloadTmp.Name()
-	_ = downloadTmp.Close()
 	defer func() { _ = os.Remove(downloadTmpName) }()
+	if err := downloadTmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
 
 	slog.Info("fetching backup", "bucket", cfg.s3Bucket, "key", key)
 	if err := storage.downloadFile(ctx, cfg.s3Bucket, key, downloadTmpName); err != nil {
@@ -213,14 +218,16 @@ func doRestore(ctx context.Context, cfg config, storage *storageClient, timestam
 
 	// Decrypt if needed, streaming into a second temp file.
 	restoreFile := downloadTmpName
-	if cfg.passphrase != "" || cfg.agePublicKey != "" {
+	if encrypted {
 		decryptedTmp, err := os.CreateTemp("", "postgres-s3-restore-*.dump")
 		if err != nil {
 			return fmt.Errorf("create temp file for decryption: %w", err)
 		}
 		decryptedTmpName := decryptedTmp.Name()
-		_ = decryptedTmp.Close()
 		defer func() { _ = os.Remove(decryptedTmpName) }()
+		if err := decryptedTmp.Close(); err != nil {
+			return fmt.Errorf("close temp file for decryption: %w", err)
+		}
 
 		slog.Info("decrypting backup")
 		if err := decryptFile(downloadTmpName, decryptedTmpName, cfg); err != nil {
@@ -230,7 +237,7 @@ func doRestore(ctx context.Context, cfg config, storage *storageClient, timestam
 	}
 
 	slog.Info("restoring from backup")
-	if err := runPgRestore(cfg, restoreFile); err != nil {
+	if err := runPgRestore(ctx, cfg, restoreFile); err != nil {
 		return err
 	}
 
@@ -238,33 +245,33 @@ func doRestore(ctx context.Context, cfg config, storage *storageClient, timestam
 	return nil
 }
 
-// suffixOf returns the file-type portion after ".dump" for use in temp file names.
-func suffixOf(fileSuffix string) string {
-	if fileSuffix == ".dump.age" {
-		return ".age"
-	}
-	return ""
-}
-
-func decryptFile(inputFile, outputFile string, cfg config) error {
+func decryptFile(inputFile, outputFile string, cfg config) (returnErr error) {
+	// inputFile is a private temporary file created by doRestore.
+	//nolint:gosec // The path is generated internally rather than supplied by a user.
 	in, err := os.Open(inputFile)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
 
+	// outputFile is a private temporary file created by doRestore.
+	//nolint:gosec // The path is generated internally rather than supplied by a user.
 	out, err := os.Create(outputFile)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = out.Close() }()
+	defer func() {
+		if err := out.Close(); returnErr == nil && err != nil {
+			returnErr = fmt.Errorf("close decrypted file: %w", err)
+		}
+	}()
 
-	identity, err := buildAgeIdentity(cfg)
+	identities, err := buildAgeIdentities(cfg)
 	if err != nil {
 		return err
 	}
 
-	dec, err := age.Decrypt(in, identity)
+	dec, err := age.Decrypt(in, identities...)
 	if err != nil {
 		return fmt.Errorf("age decrypt: %w", err)
 	}
@@ -275,9 +282,12 @@ func decryptFile(inputFile, outputFile string, cfg config) error {
 	return nil
 }
 
-func resolveBackupKey(ctx context.Context, cfg config, storage *storageClient, timestamp, fileSuffix string) (string, error) {
+func resolveBackupKey(ctx context.Context, cfg config, storage objectStorage, timestamp string, encrypted bool) (string, error) {
 	if timestamp != "" {
-		return path.Join(normalizedS3Prefix(cfg), fmt.Sprintf("%s_%s%s", cfg.postgresDatabase, timestamp, fileSuffix)), nil
+		if _, err := parseBackupTimestamp(timestamp); err != nil {
+			return "", err
+		}
+		return backupObjectKey(cfg, timestamp, encrypted), nil
 	}
 
 	slog.Info("finding latest backup")
@@ -286,10 +296,10 @@ func resolveBackupKey(ctx context.Context, cfg config, storage *storageClient, t
 		return "", err
 	}
 
-	var candidates []backupObject
+	var candidates []backupInfo
 	for _, obj := range objects {
-		if strings.HasSuffix(obj.key, fileSuffix) {
-			candidates = append(candidates, obj)
+		if backup, ok := parseBackupObject(cfg, obj.key); ok && backup.encrypted == encrypted {
+			candidates = append(candidates, backup)
 		}
 	}
 	if len(candidates) == 0 {
@@ -297,7 +307,10 @@ func resolveBackupKey(ctx context.Context, cfg config, storage *storageClient, t
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].lastModified.Before(candidates[j].lastModified)
+		if candidates[i].createdAt.Equal(candidates[j].createdAt) {
+			return candidates[i].key < candidates[j].key
+		}
+		return candidates[i].createdAt.Before(candidates[j].createdAt)
 	})
 
 	return candidates[len(candidates)-1].key, nil
@@ -305,36 +318,32 @@ func resolveBackupKey(ctx context.Context, cfg config, storage *storageClient, t
 
 // doList prints all available backup timestamps for the configured database,
 // one per line, sorted oldest to newest.
-func doList(ctx context.Context, cfg config, storage *storageClient) error {
+func doList(ctx context.Context, cfg config, storage objectStorage) error {
 	objects, err := storage.listObjects(ctx, cfg.s3Bucket, backupObjectPrefix(cfg))
 	if err != nil {
 		return err
 	}
 
-	if len(objects) == 0 {
+	backups := validBackups(cfg, objects)
+	if len(backups) == 0 {
 		slog.Info("no backups found")
 		return nil
 	}
 
-	sort.Slice(objects, func(i, j int) bool {
-		return objects[i].lastModified.Before(objects[j].lastModified)
+	sort.Slice(backups, func(i, j int) bool {
+		if backups[i].createdAt.Equal(backups[j].createdAt) {
+			return backups[i].key < backups[j].key
+		}
+		return backups[i].createdAt.Before(backups[j].createdAt)
 	})
 
-	dbPrefix := cfg.postgresDatabase + "_"
-	for _, obj := range objects {
-		base := path.Base(obj.key)
-		if !strings.HasPrefix(base, dbPrefix) {
-			continue
-		}
-		ts := strings.TrimPrefix(base, dbPrefix)
-		ts = strings.TrimSuffix(ts, ".dump.age")
-		ts = strings.TrimSuffix(ts, ".dump")
-		fmt.Println(ts)
+	for _, backup := range backups {
+		fmt.Println(backup.timestamp)
 	}
 	return nil
 }
 
-func pruneOldBackups(ctx context.Context, cfg config, storage *storageClient) error {
+func pruneOldBackups(ctx context.Context, cfg config, storage objectStorage) error {
 	cutoff := time.Now().UTC().Add(-time.Duration(cfg.backupKeepDays) * 24 * time.Hour)
 	slog.Info("removing old backups", "cutoff", cutoff.Format(time.RFC3339))
 
@@ -343,14 +352,12 @@ func pruneOldBackups(ctx context.Context, cfg config, storage *storageClient) er
 		return err
 	}
 
-	for _, obj := range objects {
-		if obj.lastModified.IsZero() {
-			continue
-		}
-		if obj.lastModified.Before(cutoff) {
-			if err := storage.deleteObject(ctx, cfg.s3Bucket, obj.key); err != nil {
+	for _, backup := range validBackups(cfg, objects) {
+		if backup.createdAt.Before(cutoff) {
+			if err := storage.deleteObject(ctx, cfg.s3Bucket, backup.key); err != nil {
 				return err
 			}
+			slog.Debug("removed old backup", "key", backup.key)
 		}
 	}
 
@@ -366,11 +373,69 @@ func backupObjectPrefix(cfg config) string {
 	return prefix + "/" + cfg.postgresDatabase + "_"
 }
 
+func backupObjectKey(cfg config, timestamp string, encrypted bool) string {
+	key := backupObjectPrefix(cfg) + timestamp + ".dump"
+	if encrypted {
+		key += ".age"
+	}
+	return key
+}
+
+func backupUsesEncryption(cfg config) bool {
+	return cfg.passphrase != "" || cfg.agePublicKey != ""
+}
+
+func restoreUsesEncryption(cfg config) bool {
+	return cfg.passphrase != "" || cfg.agePublicKey != "" || cfg.ageIdentity != ""
+}
+
+func parseBackupTimestamp(value string) (time.Time, error) {
+	timestamp, err := time.ParseInLocation(backupTimestampLayout, value, time.UTC)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("expected YYYY-MM-DDTHH:MM:SS with optional fractional seconds: %w", err)
+	}
+	return timestamp, nil
+}
+
+func parseBackupObject(cfg config, key string) (backupInfo, bool) {
+	name, found := strings.CutPrefix(key, backupObjectPrefix(cfg))
+	if !found || name == "" || strings.ContainsRune(name, '/') {
+		return backupInfo{}, false
+	}
+
+	encrypted := false
+	switch {
+	case strings.HasSuffix(name, ".dump.age"):
+		encrypted = true
+		name = strings.TrimSuffix(name, ".dump.age")
+	case strings.HasSuffix(name, ".dump"):
+		name = strings.TrimSuffix(name, ".dump")
+	default:
+		return backupInfo{}, false
+	}
+
+	timestamp, err := parseBackupTimestamp(name)
+	if err != nil {
+		return backupInfo{}, false
+	}
+	return backupInfo{key: key, timestamp: name, createdAt: timestamp, encrypted: encrypted}, true
+}
+
+func validBackups(cfg config, objects []backupObject) []backupInfo {
+	backups := make([]backupInfo, 0, len(objects))
+	for _, obj := range objects {
+		if backup, ok := parseBackupObject(cfg, obj.key); ok {
+			backups = append(backups, backup)
+		}
+	}
+	return backups
+}
+
 func normalizedS3Prefix(cfg config) string {
 	return strings.Trim(strings.TrimSpace(cfg.s3Prefix), "/")
 }
 
-func buildPgDumpCmd(cfg config) *exec.Cmd {
+func buildPgDumpCmd(ctx context.Context, cfg config) *exec.Cmd {
 	args := make([]string, 0, 11+len(cfg.pgDumpExtraOpts))
 	args = append(args,
 		"--format=custom",
@@ -394,7 +459,8 @@ func buildPgDumpCmd(cfg config) *exec.Cmd {
 	}
 	args = append(args, cfg.pgDumpExtraOpts...)
 
-	cmd := exec.Command("pg_dump", args...)
+	//nolint:gosec // The executable is fixed and arguments are passed directly without a shell.
+	cmd := exec.CommandContext(ctx, "pg_dump", args...)
 	env := os.Environ()
 	if cfg.postgresPassword != "" {
 		env = append(env, "PGPASSWORD="+cfg.postgresPassword)
@@ -419,18 +485,21 @@ func hasPgDumpCompressionOption(opts []string) bool {
 	return false
 }
 
-func runPgRestore(cfg config, inputFile string) error {
+func buildPgRestoreCmd(ctx context.Context, cfg config, inputFile string) *exec.Cmd {
 	args := []string{
 		"-h", cfg.postgresHost,
 		"-p", cfg.postgresPort,
 		"-U", cfg.postgresUser,
 		"-d", cfg.postgresDatabase,
-		"--clean",
-		"--if-exists",
-		inputFile,
 	}
+	if cfg.pgRestoreClean {
+		args = append(args, "--clean", "--if-exists")
+	}
+	args = append(args, cfg.pgRestoreExtraOpts...)
+	args = append(args, inputFile)
 
-	cmd := exec.Command("pg_restore", args...)
+	//nolint:gosec // The executable is fixed and arguments are passed directly without a shell.
+	cmd := exec.CommandContext(ctx, "pg_restore", args...)
 	env := os.Environ()
 	if cfg.postgresPassword != "" {
 		env = append(env, "PGPASSWORD="+cfg.postgresPassword)
@@ -438,7 +507,11 @@ func runPgRestore(cfg config, inputFile string) error {
 	cmd.Env = env
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	return cmd
+}
 
+func runPgRestore(ctx context.Context, cfg config, inputFile string) error {
+	cmd := buildPgRestoreCmd(ctx, cfg, inputFile)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("pg_restore failed: %w", err)
 	}

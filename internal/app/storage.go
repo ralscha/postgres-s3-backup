@@ -8,19 +8,24 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 type storageClient struct {
 	client   *s3.Client
 	transfer *transfermanager.Client
+}
+
+type objectStorage interface {
+	uploadStream(context.Context, string, string, io.Reader) error
+	downloadFile(context.Context, string, string, string) error
+	listObjects(context.Context, string, string) ([]backupObject, error)
+	deleteObject(context.Context, string, string) error
 }
 
 func newStorageClient(ctx context.Context, cfg config) (*storageClient, error) {
@@ -32,7 +37,7 @@ func newStorageClient(ctx context.Context, cfg config) (*storageClient, error) {
 		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			cfg.s3AccessKeyID,
 			cfg.s3SecretAccessKey,
-			"",
+			cfg.s3SessionToken,
 		)))
 	}
 
@@ -41,17 +46,10 @@ func newStorageClient(ctx context.Context, cfg config) (*storageClient, error) {
 		return nil, fmt.Errorf("unable to load AWS config: %w", err)
 	}
 
-	usePathStyle := shouldUsePathStyle(cfg)
-
 	clientOpts := func(o *s3.Options) {
-		o.UsePathStyle = usePathStyle
+		o.UsePathStyle = shouldUsePathStyle(cfg)
 		if cfg.s3Endpoint != "" {
-			endpoint := strings.TrimSpace(cfg.s3Endpoint)
-			u, parseErr := url.Parse(endpoint)
-			if parseErr == nil && u.Scheme == "" {
-				endpoint = "https://" + endpoint
-			}
-			o.BaseEndpoint = aws.String(endpoint)
+			o.BaseEndpoint = aws.String(cfg.s3Endpoint)
 		}
 	}
 
@@ -61,6 +59,32 @@ func newStorageClient(ctx context.Context, cfg config) (*storageClient, error) {
 		client:   client,
 		transfer: transfermanager.New(client),
 	}, nil
+}
+
+func normalizeS3Endpoint(raw string) (string, error) {
+	endpoint := strings.TrimSpace(raw)
+	if endpoint == "" {
+		return "", nil
+	}
+	if !strings.Contains(endpoint, "://") {
+		endpoint = "https://" + endpoint
+	}
+
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid S3_ENDPOINT: %w", err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", errors.New("invalid S3_ENDPOINT (expected an HTTP or HTTPS URL)")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("invalid S3_ENDPOINT (query strings and fragments are not supported)")
+	}
+	if u.User != nil {
+		return "", errors.New("invalid S3_ENDPOINT (embedded credentials are not supported)")
+	}
+
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 func shouldUsePathStyle(cfg config) bool {
@@ -92,21 +116,22 @@ func (s *storageClient) uploadStream(ctx context.Context, bucket, key string, bo
 }
 
 func (s *storageClient) downloadFile(ctx context.Context, bucket, key, filePath string) error {
+	//nolint:gosec // The caller provides a private temporary path created by doRestore.
 	f, err := os.Create(filePath)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = f.Close()
-	}()
-
-	_, err = s.transfer.DownloadObject(ctx, &transfermanager.DownloadObjectInput{
+	_, downloadErr := s.transfer.DownloadObject(ctx, &transfermanager.DownloadObjectInput{
 		Bucket:   aws.String(bucket),
 		Key:      aws.String(key),
 		WriterAt: f,
 	})
-	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
+	closeErr := f.Close()
+	if downloadErr != nil {
+		return fmt.Errorf("download failed: %w", downloadErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close downloaded file: %w", closeErr)
 	}
 	return nil
 }
@@ -127,14 +152,7 @@ func (s *storageClient) listObjects(ctx context.Context, bucket, prefix string) 
 			if obj.Key == nil {
 				continue
 			}
-			modified := time.Time{}
-			if obj.LastModified != nil {
-				modified = *obj.LastModified
-			}
-			items = append(items, backupObject{
-				key:          *obj.Key,
-				lastModified: modified,
-			})
+			items = append(items, backupObject{key: *obj.Key})
 		}
 	}
 
@@ -147,9 +165,6 @@ func (s *storageClient) deleteObject(ctx context.Context, bucket, key string) er
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		if _, ok := errors.AsType[*types.NoSuchKey](err); ok {
-			return nil
-		}
 		return fmt.Errorf("delete object %q failed: %w", key, err)
 	}
 	return nil

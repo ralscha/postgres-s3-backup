@@ -1,13 +1,13 @@
 module postgres-s3-backup
 
-go 1.27.2
+go 1.27.3
 
 require (
 	filippo.io/age v1.3.2
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
-	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.16
+	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.17
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
 	github.com/robfig/cron/v3 v3.0.1
 )

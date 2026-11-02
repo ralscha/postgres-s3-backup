@@ -6,7 +6,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid=" -o /out/postgres-s3-backup ./cmd/postgres-s3-backup
 
-FROM alpine:3.23
+FROM alpine:3.24
 RUN apk add --no-cache postgresql18-client \
     && addgroup -S backup \
     && adduser -S -G backup backup
